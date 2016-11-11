@@ -2571,43 +2571,68 @@ begin_fwd:
 	}
 }
 
+/* We allow to exceed memory limits for FIN packets to expedite
++ * connection tear down and (memory) recovery.
++ * Otherwise tcp_send_fin() could loop forever.
++ */
+static void sk_forced_wmem_schedule(struct sock *sk, int size)
+{
+	int amt, status;
+
+	if (size <= sk->sk_forward_alloc)
+		return;
+	amt = sk_mem_pages(size);
+	sk->sk_forward_alloc += amt * SK_MEM_QUANTUM;
+	sk_memory_allocated_add(sk, amt, &status);
+}
+
 /* Send a fin.  The caller locks the socket for us.  This cannot be
  * allowed to fail queueing a FIN frame under any circumstances.
  */
 void tcp_send_fin(struct sock *sk)
 {
+	struct sk_buff *skb, *tskb = tcp_write_queue_tail(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
-	struct sk_buff *skb = tcp_write_queue_tail(sk);
-	int mss_now;
+	//struct sk_buff *skb = tcp_write_queue_tail(sk);
+	//int mss_now;
 
 	/* Optimization, tack on the FIN if we have a queue of
 	 * unsent frames.  But be careful about outgoing SACKS
 	 * and IP options.
 	 */
-	mss_now = tcp_current_mss(sk);
-
-	if (tcp_send_head(sk) != NULL) {
-		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
-		TCP_SKB_CB(skb)->end_seq++;
+	if (tskb && (tcp_send_head(sk) || sk_under_memory_pressure(sk))) {
+coalesce:
+		TCP_SKB_CB(tskb)->tcp_flags |= TCPHDR_FIN;
+		TCP_SKB_CB(tskb)->end_seq++;
 		tp->write_seq++;
 	} else {
+		if (!tcp_send_head(sk)) {
+			/* This means tskb was already sent.
+			 * Pretend we included the FIN on previous transmit.
+			 * We need to set tp->snd_nxt to the value it would have
+			 * if FIN had been sent. This is because retransmit path
+			 * does not change tp->snd_nxt.
+			 */
+			tp->snd_nxt++;
+			return;
+		}
 		/* Socket is locked, keep trying until memory is available. */
-		for (;;) {
-			skb = alloc_skb_fclone(MAX_TCP_HEADER,
-					       sk->sk_allocation);
-			if (skb)
-				break;
-			yield();
+		skb = alloc_skb_fclone(MAX_TCP_HEADER, sk->sk_allocation);
+		if (unlikely(!skb)) {
+			if (tskb)
+				goto coalesce;
+			return;
 		}
 
 		/* Reserve space for headers and prepare control bits. */
 		skb_reserve(skb, MAX_TCP_HEADER);
+		sk_forced_wmem_schedule(sk, skb->truesize);
 		/* FIN eats a sequence byte, write_seq advanced by tcp_queue_skb(). */
 		tcp_init_nondata_skb(skb, tp->write_seq,
 				     TCPHDR_ACK | TCPHDR_FIN);
 		tcp_queue_skb(sk, skb);
 	}
-	__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_OFF);
+	__tcp_push_pending_frames(sk, tcp_current_mss(sk), TCP_NAGLE_OFF);
 }
 
 /* We get here when a process closes a file descriptor (either due to
@@ -2776,6 +2801,8 @@ struct sk_buff *tcp_make_synack(struct sock *sk, struct dst_entry *dst,
 	}
 #endif
 
+	/* Do not fool tcpdump (if any), clean our debris */
+	skb->tstamp.tv64 = 0;
 	return skb;
 }
 EXPORT_SYMBOL(tcp_make_synack);

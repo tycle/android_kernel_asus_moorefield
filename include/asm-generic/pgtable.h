@@ -52,10 +52,10 @@ static inline int pmdp_test_and_clear_young(struct vm_area_struct *vma,
 {
 	pmd_t pmd = *pmdp;
 	int r = 1;
-	if (!pmd_young(pmd))
+	if (pmd_none(pmdval) || pmd_trans_huge(pmdval))
 		r = 0;
 	else
-		set_pmd_at(vma->vm_mm, address, pmdp, pmd_mkold(pmd));
+		pmd_clear_bad(pmd);
 	return r;
 }
 #else /* CONFIG_TRANSPARENT_HUGEPAGE */
