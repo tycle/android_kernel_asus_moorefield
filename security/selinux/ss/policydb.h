@@ -159,11 +159,10 @@ struct cond_node;
  * utilities such as audit2allow to determine constraint denials.
  */
 struct type_set {
-        struct ebitmap types;
-        struct ebitmap negset;
-        u32 flags;
+	struct ebitmap types;
+	struct ebitmap negset;
+	u32 flags;
 };
-
 
 /*
  * The configuration data includes security contexts for
